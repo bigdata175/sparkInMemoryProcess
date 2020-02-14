@@ -1,0 +1,135 @@
+
+scala> import org.apache.spark.sql.Row
+import org.apache.spark.sql.Row
+
+scala> import org.apache.spark.sql.types._
+import org.apache.spark.sql.types._
+
+scala> import org.apache.spark.sql.functions._
+import org.apache.spark.sql.functions._
+
+scala> import spark.implicits._
+import spark.implicits._
+
+scala>
+
+scala> val inputSensorDataPath="hdfs://XXXXXXXXXXXXXXX/"
+inputSensorDataPath: String = hdfs://XXXXXXXXXXXXXXX/
+
+scala> val data = sc.wholeTextFiles(inputSensorDataPath)
+data: org.apache.spark.rdd.RDD[(String, String)] = hdfs://XXXXXXXXXXXXXXX/ MapPartitionsRDD[1] at wholeTextFiles at <console>:36
+
+scala> var fileCount = sc.longAccumulator
+fileCount: org.apache.spark.util.LongAccumulator = LongAccumulator(id: 0, name: None, value: 0)
+
+scala> var totalRecords = sc.longAccumulator
+totalRecords: org.apache.spark.util.LongAccumulator = LongAccumulator(id: 1, name: None, value: 0)
+
+scala> var processedRecords = sc.longAccumulator
+processedRecords: org.apache.spark.util.LongAccumulator = LongAccumulator(id: 2, name: None, value: 0)
+
+scala> var failedRecords = sc.longAccumulator
+failedRecords: org.apache.spark.util.LongAccumulator = LongAccumulator(id: 3, name: None, value: 0)
+
+scala> var dataRDD = sc.emptyRDD[Row]
+dataRDD: org.apache.spark.rdd.RDD[org.apache.spark.sql.Row] = EmptyRDD[2] at emptyRDD at <console>:34
+
+scala> val customSchema = StructType(Array(StructField("sensorId", StringType, true),StructField("humidity", StringType, true)))
+customSchema: org.apache.spark.sql.types.StructType = StructType(StructField(sensorId,StringType,true), StructField(humidity,StringType,true))
+
+scala> val MaxAvgMinSchema = StructType(Array(StructField("sensorId", StringType, true),StructField("MIN", DoubleType, true),StructField("AVG", DoubleType, true),StructField("MAX", DoubleType, true)))
+MaxAvgMinSchema: org.apache.spark.sql.types.StructType = StructType(StructField(sensorId,StringType,true), StructField(MIN,DoubleType,true), StructField(AVG,DoubleType,true), StructField(MAX,DoubleType,true))
+
+scala> var finalProcessedDF = spark.createDataFrame(dataRDD, MaxAvgMinSchema)
+finalProcessedDF: org.apache.spark.sql.DataFrame = [sensorId: string, MIN: double ... 2 more fields]
+
+scala> var finalFailedDF = spark.createDataFrame(dataRDD, MaxAvgMinSchema)
+finalFailedDF: org.apache.spark.sql.DataFrame = [sensorId: string, MIN: double ... 2 more fields]
+
+scala> val files = data.map {case (filename, content) => filename}
+files: org.apache.spark.rdd.RDD[String] = MapPartitionsRDD[5] at map at <console>:38
+
+scala>
+
+scala>
+
+scala> def calMeasure(file: String) = {
+     | println (file);
+     | val sensorDF = spark.read.format("csv").option("delimiter",",").option("header", "true").schema(customSchema).load(file)
+     | fileCount.add(1);
+     | totalRecords.add(sensorDF.count);
+     | val processedRec=sensorDF.filter("humidity != 'NaN'")
+     | val processedDF=processedRec.groupBy(sensorDF.col("sensorId")).agg(min("humidity"), avg("humidity"), max("humidity")).orderBy(avg("humidity").desc)
+     | processedRecords.add(processedRec.count)
+     | val failedDF=sensorDF.filter("humidity = 'NaN'").groupBy(sensorDF.col("sensorId")).agg(min("humidity"), avg("humidity"), max("humidity")).orderBy(avg("humidity").desc)
+     | failedRecords.add(failedDF.count)
+     | finalProcessedDF=finalProcessedDF.union(processedDF)
+     | finalFailedDF=finalFailedDF.union(failedDF)
+     | }
+calMeasure: (file: String)Unit
+
+scala>
+
+scala> files.collect.foreach( filename => {calMeasure(filename)});
+hdfs://XXXXXXXXXXXXXXX/leader-3.csv
+hdfs://XXXXXXXXXXXXXXX/leader-1.csv
+hdfs://XXXXXXXXXXXXXXX/leader-2.csv
+
+scala> val highAvgHumidityDF=(finalProcessedDF.groupBy(finalProcessedDF.col("sensorId")).agg(min("MIN"), avg("AVG"), max("MAX")).orderBy(avg("AVG").desc)).union(finalFailedDF.groupBy(finalFailedDF.col("sensorId")).agg(min("MIN"), avg("AVG"), max("MAX")).orderBy(avg("AVG").desc))
+highAvgHumidityDF: org.apache.spark.sql.Dataset[org.apache.spark.sql.Row] = [sensorId: string, min(MIN): string ... 2 more fields]
+
+scala>
+
+scala> println(s" <--- Sensor Statistics --->");
+ <--- Sensor Statistics --->
+
+scala>
+
+scala> println(s"[Info] Num of processed files: ${fileCount.value}");
+[Info] Num of processed files: 3
+
+scala> println(s"[Info] Total Num of measurements: ${totalRecords.value}");
+[Info] Total Num of measurements: 12
+
+scala> println(s"[Info] Num of processed measurements: ${processedRecords.value}");
+[Info] Num of processed measurements: 9
+
+scala> println(s"[Info] Num of failed measurements: ${failedRecords.value}");
+[Info] Num of failed measurements: 3
+
+scala> println(s"[Info] min/avg/max of processed measurements:");
+[Info] min/avg/max of processed measurements:
+
+scala> finalProcessedDF.groupBy(finalProcessedDF.col("sensorId")).agg(min("MIN"), avg("AVG"), max("MAX")).orderBy(avg("AVG").desc).show()
++--------+--------+-----------------+--------+
+|sensorId|min(MIN)|         avg(AVG)|max(MAX)|
++--------+--------+-----------------+--------+
+|      s2|      77|81.77777777777777|      88|
+|      s1|      10|68.66666666666667|      98|
++--------+--------+-----------------+--------+
+
+
+scala> println(s"[Info] min/avg/max of failed measurements:");
+[Info] min/avg/max of failed measurements:
+
+scala> finalFailedDF.groupBy(finalFailedDF.col("sensorId")).agg(min("MIN"), avg("AVG"), max("MAX")).orderBy(avg("AVG").desc).show()
++--------+--------+--------+--------+
+|sensorId|min(MIN)|avg(AVG)|max(MAX)|
++--------+--------+--------+--------+
+|      s3|     NaN|     NaN|     NaN|
+|      s1|     NaN|     NaN|     NaN|
++--------+--------+--------+--------+
+
+
+scala> println(s"[Info] sensors by highest avg humidity:");
+[Info] sensors by highest avg humidity:
+
+scala> highAvgHumidityDF.show()
++--------+--------+-----------------+--------+
+|sensorId|min(MIN)|         avg(AVG)|max(MAX)|
++--------+--------+-----------------+--------+
+|      s2|      77|81.77777777777777|      88|
+|      s1|      10|68.66666666666667|      98|
+|      s3|     NaN|              NaN|     NaN|
+|      s1|     NaN|              NaN|     NaN|
++--------+--------+-----------------+--------+
